@@ -1,0 +1,12 @@
+{
+  "name": "mcdb-api",
+  "main": "worker.js",
+  "compatibility_date": "2026-09-21",
+
+  "observability": {
+    "logs": {
+      "enabled": false,
+      "invocation_logs": true
+    }
+  }
+}
