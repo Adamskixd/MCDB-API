@@ -1,282 +1,205 @@
-/**
- * MCDB lookup API
- *
- * Deploy this as a Cloudflare Worker.
- *
- * Database:
- *   data/shards/00.json
- *   data/shards/01.json
- *   ...
- *   data/shards/ff.json
- *
- * Additional manual testing database:
- *   data/manual_test.json
- *
- * Example:
- *   GET /lookup/76561199291189951
- *   GET /lookup/STEAM_1:1:665462111
- *   GET /lookup/[U:1:1330924223]
- */
-
 const REPO_RAW_BASE =
   "https://raw.githubusercontent.com/Adamskixd/MCDB-API/main/data/shards";
 
 const MANUAL_TEST_URL =
   "https://raw.githubusercontent.com/Adamskixd/MCDB-API/main/data/manual_test.json";
 
+function json(value, status = 200) {
+  return new Response(JSON.stringify(value), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store, no-cache, must-revalidate, max-age=0",
+      "pragma": "no-cache",
+      "expires": "0"
+    }
+  });
+}
+
+function normalizeLookup(value) {
+  return decodeURIComponent(value || "").trim();
+}
+
+function steam64Shard(steamID64) {
+  return steamID64.slice(-2).toLowerCase();
+}
+
+async function fetchJson(url, label) {
+  const cacheBuster = Date.now();
+
+  try {
+    const response = await fetch(`${url}?nocache=${cacheBuster}`, {
+      cache: "no-store"
+    });
+
+    if (!response.ok) {
+      console.error(`${label}: HTTP ${response.status}`);
+      return null;
+    }
+
+    try {
+      return await response.json();
+    } catch (error) {
+      console.error(`${label}: invalid JSON`, error);
+      return null;
+    }
+  } catch (error) {
+    console.error(`${label}: fetch failed`, error);
+    return null;
+  }
+}
+
+async function fetchShard(shard) {
+  return fetchJson(
+    `${REPO_RAW_BASE}/${shard}.json`,
+    `shard ${shard}`
+  );
+}
+
+async function fetchManualTest() {
+  return fetchJson(MANUAL_TEST_URL, "manual_test.json");
+}
+
+function isSteamID64(value) {
+  return /^7656119\d{10}$/.test(value);
+}
+
+function isSteamID1(value) {
+  return /^STEAM_[0-5]:[01]:\d+$/.test(value);
+}
+
+function isSteamID3(value) {
+  return /^\[U:\d+:\d+\]$/.test(value);
+}
+
+function buildResult(record, lookup) {
+  if (!record || typeof record !== "object") {
+    return null;
+  }
+
+  return {
+    found: true,
+    lookup,
+    id: record.id || null,
+    id1: record.id1 || null,
+    id3: record.id3 || null,
+    label: record.label || null,
+    aliases: Array.isArray(record.aliases) ? record.aliases : []
+  };
+}
+
+async function lookup(request, lookup) {
+  // Always check the manually maintained test database first.
+  const manual = await fetchManualTest();
+  const manualRecord = manual?.[lookup];
+
+  if (manualRecord) {
+    return buildResult(manualRecord, lookup);
+  }
+
+  // SteamID64 can directly select one shard.
+  if (isSteamID64(lookup)) {
+    const shard = steam64Shard(lookup);
+    const data = await fetchShard(shard);
+    const record = data?.[lookup];
+
+    if (record) {
+      return buildResult(record, lookup);
+    }
+
+    return null;
+  }
+
+  // SteamID1 / SteamID3 may live anywhere, so search all shards.
+  if (isSteamID1(lookup) || isSteamID3(lookup)) {
+    const shards = Array.from({ length: 256 }, (_, i) =>
+      i.toString(16).padStart(2, "0")
+    );
+
+    const results = await Promise.all(
+      shards.map(async (shard) => {
+        const data = await fetchShard(shard);
+        return data?.[lookup] || null;
+      })
+    );
+
+    const record = results.find(Boolean);
+
+    if (record) {
+      return buildResult(record, lookup);
+    }
+
+    return null;
+  }
+
+  return null;
+}
 
 export default {
   async fetch(request) {
-    const url = new URL(request.url);
-    const parts = url.pathname.split("/").filter(Boolean);
+    try {
+      const url = new URL(request.url);
 
-    /*
-     * Health check
-     */
-    if (parts.length === 0 || parts[0] === "health") {
-      return json({
-        ok: true,
-        service: "mcdb-api",
-        version: 2
-      });
-    }
-
-    /*
-     * Validate lookup request
-     */
-    if (parts[0] !== "lookup" || !parts[1]) {
-      return json(
-        {
-          error: "Use /lookup/<steamid64|steamid|steam3>"
-        },
-        404
-      );
-    }
-
-    const identifier = decodeURIComponent(
-      parts.slice(1).join("/")
-    ).trim();
-
-    if (!identifier) {
-      return json(
-        {
-          error: "Missing identifier"
-        },
-        400
-      );
-    }
-
-
-    /*
-     * ========================================================
-     * SteamID64 lookup
-     * ========================================================
-     *
-     * SteamID64 is 17 digits.
-     *
-     * The final two characters determine the shard.
-     *
-     * Example:
-     *
-     * 76561199081282611
-     *                 ^^
-     *                 11.json
-     */
-    if (/^\d{17}$/.test(identifier)) {
-      const shard = identifier
-        .slice(-2)
-        .toLowerCase();
-
-      const [shardData, manualData] =
-        await Promise.all([
-          fetchShard(shard),
-          fetchManualTest()
-        ]);
-
-      /*
-       * Check the normal database first.
-       */
-      let player =
-        shardData &&
-        (
-          shardData[identifier] ||
-          shardData[identifier.toLowerCase()]
+      if (request.method !== "GET") {
+        return json(
+          {
+            found: false,
+            error: "Method not allowed"
+          },
+          405
         );
-
-      /*
-       * If not found, check manual_test.json.
-       */
-      if (!player && manualData) {
-        player =
-          manualData[identifier] ||
-          manualData[identifier.toLowerCase()];
       }
 
-      if (player) {
+      if (url.pathname === "/" || url.pathname === "") {
         return json({
-          found: true,
-          player
+          ok: true,
+          service: "MCDB API",
+          version: 2,
+          usage: "/lookup/<steamid64|steamid1|steamid3>"
         });
       }
 
+      const match = url.pathname.match(/^\/lookup\/(.+)$/);
+
+      if (!match) {
+        return json(
+          {
+            found: false,
+            error: "Not found"
+          },
+          404
+        );
+      }
+
+      const lookupValue = normalizeLookup(match[1]);
+
+      if (!lookupValue) {
+        return json({
+          found: false,
+          error: "Missing Steam ID"
+        }, 400);
+      }
+
+      const result = await lookup(request, lookupValue);
+
+      if (result) {
+        return json(result);
+      }
+
+      return json({
+        found: false,
+        lookup: lookupValue
+      });
+    } catch (error) {
+      console.error("Unhandled Worker error:", error);
+
       return json(
         {
-          found: false
+          found: false,
+          error: "Internal server error"
         },
-        404
+        500
       );
     }
-
-
-    /*
-     * ========================================================
-     * SteamID1 / Steam3 lookup
-     * ========================================================
-     *
-     * These identifiers don't contain the SteamID64 shard,
-     * so we search all 256 shards.
-     *
-     * manual_test.json is searched as well.
-     */
-
-    const shards = [];
-
-    for (let i = 0; i < 256; i++) {
-      shards.push(
-        i.toString(16).padStart(2, "0")
-      );
-    }
-
-    /*
-     * Fetch manual database and all shards concurrently.
-     */
-    const results = await Promise.all([
-      fetchManualTest(),
-
-      ...shards.map((shard) =>
-        fetchShard(shard)
-      )
-    ]);
-
-
-    /*
-     * Search each database for the identifier.
-     */
-    const player = results
-      .map((data) => {
-        if (!data) {
-          return null;
-        }
-
-        return (
-          data[identifier] ||
-          data[identifier.toLowerCase()] ||
-          null
-        );
-      })
-      .find(Boolean);
-
-
-    if (player) {
-      return json({
-        found: true,
-        player
-      });
-    }
-
-
-    return json(
-      {
-        found: false
-      },
-      404
-    );
   }
 };
-
-
-/**
- * ============================================================
- * Fetch a normal shard
- * ============================================================
- *
- * No Cloudflare cache.
- * No API cache.
- *
- * A timestamp is added to the URL so that every request gets
- * a unique GitHub URL.
- */
-async function fetchShard(shard) {
-  const cacheBuster = Date.now();
-
-  const response = await fetch(
-    `${REPO_RAW_BASE}/${shard}.json?nocache=${cacheBuster}`,
-    {
-      cache: "no-store"
-    }
-  );
-
-  if (!response.ok) {
-    return null;
-  }
-
-  return response.json();
-}
-
-
-/**
- * ============================================================
- * Fetch manual testing database
- * ============================================================
- *
- * File:
- *
- * data/manual_test.json
- *
- * This database is searched in addition to the normal shards.
- */
-async function fetchManualTest() {
-  const cacheBuster = Date.now();
-
-  const response = await fetch(
-    `${MANUAL_TEST_URL}?nocache=${cacheBuster}`,
-    {
-      cache: "no-store"
-    }
-  );
-
-  if (!response.ok) {
-    return null;
-  }
-
-  return response.json();
-}
-
-
-/**
- * ============================================================
- * JSON response helper
- * ============================================================
- *
- * API responses are not cached.
- */
-function json(value, status = 200) {
-  return new Response(
-    JSON.stringify(value),
-    {
-      status,
-
-      headers: {
-        "content-type":
-          "application/json; charset=utf-8",
-
-        "cache-control":
-          "no-store, no-cache, must-revalidate, max-age=0",
-
-        "pragma": "no-cache",
-
-        "expires": "0"
-      }
-    }
-  );
-}
