@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "generated": "2026-09-21T10:47:40.768Z",
+  "unique_players": 3969,
+  "shards": 100,
+  "shard_scheme": "last_two_characters_of_steamid64"
+}
