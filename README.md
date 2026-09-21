@@ -40,7 +40,6 @@
 
 <br clear="both">
 
-<img data-importer="snake" src="https://raw.githubusercontent.com/Adamskixd/Adamskixd/snake-output/snake.svg" alt="Snake animation" />
 
 ###
 
