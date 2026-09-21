@@ -53,5 +53,41 @@
     "aliases": [
       "onlyrare22"
     ]
-  }
+  },
+"76561198289835307": {
+  "id": "76561198289835307",
+  "id1": "STEAM_1:1:164784789",
+  "id3": "[U:1:329569579]",
+  "label": "76561198289835307",
+  "aliases": [
+    "Elsa of Arendelle",
+    "Pariah",
+    "Pariah of eighteen",
+    "Shit with no medic up his ass"
+  ]
+},
+"STEAM_1:1:164784789": {
+  "id": "76561198289835307",
+  "id1": "STEAM_1:1:164784789",
+  "id3": "[U:1:329569579]",
+  "label": "76561198289835307",
+  "aliases": [
+    "Elsa of Arendelle",
+    "Pariah",
+    "Pariah of eighteen",
+    "Shit with no medic up his ass"
+  ]
+},
+"[U:1:329569579]": {
+  "id": "76561198289835307",
+  "id1": "STEAM_1:1:164784789",
+  "id3": "[U:1:329569579]",
+  "label": "76561198289835307",
+  "aliases": [
+    "Elsa of Arendelle",
+    "Pariah",
+    "Pariah of eighteen",
+    "Shit with no medic up his ass"
+  ]
+}
 }
