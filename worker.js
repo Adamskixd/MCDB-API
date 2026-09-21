@@ -4,6 +4,9 @@ const REPO_RAW_BASE =
 const MANUAL_TEST_URL =
   "https://raw.githubusercontent.com/Adamskixd/MCDB-API/main/data/manual_test.json";
 
+const STEAMHISTORY_SOURCEBANS_URL =
+  "https://steamhistory.net/api/sourcebans";
+
 function json(value, status = 200) {
   return new Response(JSON.stringify(value), {
     status,
@@ -28,7 +31,8 @@ async function fetchJson(url, label) {
   const cacheBuster = Date.now();
 
   try {
-    const response = await fetch(`${url}?nocache=${cacheBuster}`, {
+    const separator = url.includes("?") ? "&" : "?";
+    const response = await fetch(`${url}${separator}nocache=${cacheBuster}`, {
       cache: "no-store"
     });
 
@@ -88,26 +92,28 @@ function buildResult(record, lookup) {
   };
 }
 
-async function lookup(request, lookup) {
+function findRecordInData(data, lookup) {
+  if (!data || typeof data !== "object") {
+    return null;
+  }
+
+  return data[lookup] || null;
+}
+
+async function findMcdbRecord(lookup) {
   // Always check the manually maintained test database first.
   const manual = await fetchManualTest();
-  const manualRecord = manual?.[lookup];
+  const manualRecord = findRecordInData(manual, lookup);
 
   if (manualRecord) {
-    return buildResult(manualRecord, lookup);
+    return manualRecord;
   }
 
   // SteamID64 can directly select one shard.
   if (isSteamID64(lookup)) {
     const shard = steam64Shard(lookup);
     const data = await fetchShard(shard);
-    const record = data?.[lookup];
-
-    if (record) {
-      return buildResult(record, lookup);
-    }
-
-    return null;
+    return findRecordInData(data, lookup);
   }
 
   // SteamID1 / SteamID3 may live anywhere, so search all shards.
@@ -119,24 +125,186 @@ async function lookup(request, lookup) {
     const results = await Promise.all(
       shards.map(async (shard) => {
         const data = await fetchShard(shard);
-        return data?.[lookup] || null;
+        return findRecordInData(data, lookup);
       })
     );
 
-    const record = results.find(Boolean);
-
-    if (record) {
-      return buildResult(record, lookup);
-    }
-
-    return null;
+    return results.find(Boolean) || null;
   }
 
   return null;
 }
 
+function isSteamID64Key(value) {
+  return typeof value === "string" && isSteamID64(value);
+}
+
+function extractSourceBans(payload, steamID64) {
+  if (payload == null) {
+    return {
+      available: true,
+      banned: false,
+      records: []
+    };
+  }
+
+  // Common keyed response forms.
+  const directCandidates = [
+    payload?.[steamID64],
+    payload?.data?.[steamID64],
+    payload?.results?.[steamID64],
+    payload?.sourcebans?.[steamID64],
+    payload?.bans?.[steamID64]
+  ];
+
+  let candidate = directCandidates.find((value) => value !== undefined);
+
+  // Common single-user / collection response forms.
+  if (candidate === undefined) {
+    const possibleCollections = [
+      payload?.data,
+      payload?.results,
+      payload?.sourcebans,
+      payload?.bans,
+      payload
+    ];
+
+    for (const collection of possibleCollections) {
+      if (Array.isArray(collection)) {
+        const matching = collection.filter((entry) => {
+          if (!entry || typeof entry !== "object") {
+            return false;
+          }
+
+          const ids = [
+            entry.steamid,
+            entry.steamid64,
+            entry.steam_id,
+            entry.authid,
+            entry.id
+          ];
+
+          return ids.some((id) => String(id) === steamID64);
+        });
+
+        if (matching.length > 0) {
+          candidate = matching;
+          break;
+        }
+      }
+
+      if (collection && typeof collection === "object") {
+        const nestedBanArray =
+          collection.bans ||
+          collection.records ||
+          collection.results ||
+          collection.sourcebans;
+
+        if (Array.isArray(nestedBanArray)) {
+          candidate = nestedBanArray;
+          break;
+        }
+
+        if (
+          isSteamID64Key(collection.steamid) &&
+          collection.steamid === steamID64
+        ) {
+          candidate = collection;
+          break;
+        }
+
+        if (collection.steamid64 === steamID64) {
+          candidate = collection;
+          break;
+        }
+      }
+    }
+  }
+
+  if (candidate === undefined) {
+    return {
+      available: true,
+      banned: false,
+      records: []
+    };
+  }
+
+  if (Array.isArray(candidate)) {
+    return {
+      available: true,
+      banned: candidate.length > 0,
+      records: candidate
+    };
+  }
+
+  if (candidate && typeof candidate === "object") {
+    if (typeof candidate.banned === "boolean") {
+      return {
+        available: true,
+        banned: candidate.banned,
+        records: Array.isArray(candidate.bans)
+          ? candidate.bans
+          : candidate
+      };
+    }
+
+    if (Array.isArray(candidate.bans)) {
+      return {
+        available: true,
+        banned: candidate.bans.length > 0,
+        records: candidate.bans
+      };
+    }
+
+    return {
+      available: true,
+      banned: false,
+      records: candidate
+    };
+  }
+
+  return {
+    available: true,
+    banned: false,
+    records: []
+  };
+}
+
+async function fetchSourceBans(steamID64, apiKey) {
+  if (!apiKey) {
+    return {
+      available: false,
+      banned: false,
+      records: [],
+      error: "STEAMHISTORY_API_KEY is not configured"
+    };
+  }
+
+  const params = new URLSearchParams({
+    key: apiKey,
+    shouldkey: "0",
+    steamids: steamID64
+  });
+
+  const result = await fetchJson(
+    `${STEAMHISTORY_SOURCEBANS_URL}?${params.toString()}`,
+    `SteamHistory SourceBans ${steamID64}`
+  );
+
+  if (result == null) {
+    return {
+      available: false,
+      banned: false,
+      records: [],
+      error: "SteamHistory SourceBans request failed"
+    };
+  }
+
+  return extractSourceBans(result, steamID64);
+}
+
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
     try {
       const url = new URL(request.url);
 
@@ -154,7 +322,7 @@ export default {
         return json({
           ok: true,
           service: "MCDB API",
-          version: 2,
+          version: 3,
           usage: "/lookup/<steamid64|steamid1|steamid3>"
         });
       }
@@ -174,21 +342,47 @@ export default {
       const lookupValue = normalizeLookup(match[1]);
 
       if (!lookupValue) {
-        return json({
-          found: false,
-          error: "Missing Steam ID"
-        }, 400);
+        return json(
+          {
+            found: false,
+            error: "Missing Steam ID"
+          },
+          400
+        );
       }
 
-      const result = await lookup(request, lookupValue);
+      const record = await findMcdbRecord(lookupValue);
+      const result = record ? buildResult(record, lookupValue) : null;
+
+      // SourceBans needs a SteamID64. If the lookup was a SteamID1/3,
+      // use the MCDB canonical ID when available.
+      const steamID64 = isSteamID64(lookupValue)
+        ? lookupValue
+        : record?.id || null;
+
+      const sourcebans = steamID64
+        ? await fetchSourceBans(
+            steamID64,
+            env?.STEAMHISTORY_API_KEY
+          )
+        : {
+            available: false,
+            banned: false,
+            records: [],
+            error: "No SteamID64 available for SourceBans lookup"
+          };
 
       if (result) {
-        return json(result);
+        return json({
+          ...result,
+          sourcebans
+        });
       }
 
       return json({
         found: false,
-        lookup: lookupValue
+        lookup: lookupValue,
+        sourcebans
       });
     } catch (error) {
       console.error("Unhandled Worker error:", error);
