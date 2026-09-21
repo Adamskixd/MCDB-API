@@ -182,5 +182,47 @@
     "afk",
     "Frank Drebin - Spezialeinheit"
   ]
+},
+  "76561198136496249": {
+  "id": "76561198136496249",
+  "id1": "STEAM_1:1:88115260",
+  "id3": "[U:1:176230521]",
+  "label": "76561198136496249",
+  "aliases": [
+    "ViktorUSH",
+    "Suspicious Yogurt",
+    "Suspicious Viktor",
+    "csgo3.com",
+    "engineer gaming",
+    "Viktor"
+  ]
+},
+"STEAM_1:1:88115260": {
+  "id": "76561198136496249",
+  "id1": "STEAM_1:1:88115260",
+  "id3": "[U:1:176230521]",
+  "label": "76561198136496249",
+  "aliases": [
+    "ViktorUSH",
+    "Suspicious Yogurt",
+    "Suspicious Viktor",
+    "csgo3.com",
+    "engineer gaming",
+    "Viktor"
+  ]
+},
+"[U:1:176230521]": {
+  "id": "76561198136496249",
+  "id1": "STEAM_1:1:88115260",
+  "id3": "[U:1:176230521]",
+  "label": "76561198136496249",
+  "aliases": [
+    "ViktorUSH",
+    "Suspicious Yogurt",
+    "Suspicious Viktor",
+    "csgo3.com",
+    "engineer gaming",
+    "Viktor"
+  ]
 }
 }
