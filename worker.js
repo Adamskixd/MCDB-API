@@ -10,7 +10,7 @@
  *   GET /lookup/[U:1:1330924223]
  */
 
-const REPO_RAW_BASE = "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/data/shards";
+const REPO_RAW_BASE = "https://raw.githubusercontent.com/Adamskixd/MCDB-API/main/data/shards";
 
 export default {
   async fetch(request) {
