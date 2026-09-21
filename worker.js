@@ -14,8 +14,12 @@ const SOURCEBANS_KEYWORDS = [
   "cheat",
   "aimbot",
   "hack",
-  "stac",
-  "multihack"
+  "wallhack",
+  "multihack",
+  "[stac]",
+  "smac ",
+  "[ac]",
+  "anti-cheat"
 ];
 
 function json(value, status = 200) {
@@ -136,19 +140,15 @@ function findRecordInData(data, lookup) {
 }
 
 async function findMcdbRecord(lookup) {
-  // Manual test database gets checked first.
+  // Manual database is checked first.
   const manual = await fetchManualTest();
-
-  const manualRecord = findRecordInData(
-    manual,
-    lookup
-  );
+  const manualRecord = findRecordInData(manual, lookup);
 
   if (manualRecord) {
     return manualRecord;
   }
 
-  // SteamID64 directly determines the shard.
+  // SteamID64 -> direct shard lookup.
   if (isSteamID64(lookup)) {
     const shard = steam64Shard(lookup);
     const data = await fetchShard(shard);
@@ -156,7 +156,7 @@ async function findMcdbRecord(lookup) {
     return findRecordInData(data, lookup);
   }
 
-  // SteamID1 / Steam3 can exist in any shard.
+  // SteamID1 / Steam3 -> search all shards.
   if (isSteamID1(lookup) || isSteamID3(lookup)) {
     const shards = Array.from(
       { length: 256 },
@@ -195,176 +195,65 @@ function buildResult(record, lookup) {
 }
 
 /*
- * SteamHistory search
- *
- * This is useful for locating the SteamHistory profile.
- * The actual SourceBans data is requested separately below.
+ * SteamHistory profile search.
  */
 async function searchSteamHistory(steamID64) {
-  const result = await postJson(
+  return postJson(
     STEAMHISTORY_SEARCH_URL,
     {
       query: steamID64
     },
     `SteamHistory search ${steamID64}`
   );
-
-  return result;
 }
 
 /*
- * Recursively collect fields named:
- *
- *   keyword
- *   keywords
- *
- * This handles strings, arrays and nested objects.
+ * Scan SourceBans BanReason values for keywords.
  */
-function collectKeywordFields(value, output = []) {
-  if (value == null) {
-    return output;
-  }
-
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      collectKeywordFields(item, output);
-    }
-
-    return output;
-  }
-
-  if (typeof value !== "object") {
-    return output;
-  }
-
-  for (const [key, fieldValue] of Object.entries(value)) {
-    if (/^keywords?$/i.test(key)) {
-      if (Array.isArray(fieldValue)) {
-        for (const item of fieldValue) {
-          output.push(String(item));
-        }
-      } else if (fieldValue != null) {
-        output.push(String(fieldValue));
-      }
-    }
-
-    collectKeywordFields(fieldValue, output);
-  }
-
-  return output;
-}
-
-function scanSourceBansKeywords(payload) {
-  const keywordFields = collectKeywordFields(payload);
-
-  const combinedText = keywordFields
-    .join(" ")
-    .toLowerCase();
-
-  const matchedKeywords = SOURCEBANS_KEYWORDS.filter(
-    (keyword) =>
-      combinedText.includes(keyword.toLowerCase())
+function analyzeSourceBans(bans) {
+  const activeBans = bans.filter(
+    (ban) =>
+      ban &&
+      String(ban.CurrentState || "").toLowerCase() !== "unbanned"
   );
 
+  const matchedKeywords = new Set();
+
+  for (const ban of activeBans) {
+    const reason = String(
+      ban?.BanReason || ""
+    ).toLowerCase();
+
+    for (const keyword of SOURCEBANS_KEYWORDS) {
+      if (reason.includes(keyword.toLowerCase())) {
+        matchedKeywords.add(keyword);
+      }
+    }
+  }
+
   return {
-    keywordMatch: matchedKeywords.length > 0,
-    matchedKeywords,
-    keywordFields
+    banned: activeBans.length > 0,
+    activeBans,
+    keywordMatch: matchedKeywords.size > 0,
+    matchedKeywords: [...matchedKeywords]
   };
 }
 
-function extractSourceBansRecords(payload, steamID64) {
-  if (payload == null) {
-    return [];
-  }
-
-  const possibleArrays = [
-    payload?.bans,
-    payload?.records,
-    payload?.results,
-    payload?.sourcebans,
-    payload?.data,
-    payload
-  ];
-
-  for (const value of possibleArrays) {
-    if (!Array.isArray(value)) {
-      continue;
-    }
-
-    const matching = value.filter((entry) => {
-      if (!entry || typeof entry !== "object") {
-        return false;
-      }
-
-      const ids = [
-        entry.steamid,
-        entry.steamID,
-        entry.steamid64,
-        entry.steamID64,
-        entry.steam_id,
-        entry.authid,
-        entry.id
-      ];
-
-      // If no SteamID field exists, retain the record because
-      // the endpoint was queried specifically for this SteamID.
-      const hasMatchingID = ids.some(
-        (id) => String(id) === steamID64
-      );
-
-      return hasMatchingID || ids.every(
-        (id) => id == null
-      );
-    });
-
-    if (matching.length > 0) {
-      return matching;
-    }
-
-    if (value.length > 0) {
-      return value;
-    }
-  }
-
-  // Keyed response:
-  // { "7656119...": [...] }
-  if (
-    payload &&
-    typeof payload === "object" &&
-    payload[steamID64] !== undefined
-  ) {
-    const value = payload[steamID64];
-
-    if (Array.isArray(value)) {
-      return value;
-    }
-
-    if (value && typeof value === "object") {
-      return [value];
-    }
-  }
-
-  // Single record response.
-  if (
-    payload &&
-    typeof payload === "object" &&
-    (
-      payload.steamid === steamID64 ||
-      payload.steamid64 === steamID64 ||
-      payload.steamID64 === steamID64
-    )
-  ) {
-    return [payload];
-  }
-
-  return [];
-}
-
-async function fetchSourceBans(
-  steamID64,
-  apiKey
-) {
+/*
+ * SteamHistory SourceBans response is expected to look like:
+ *
+ * {
+ *   "response": {
+ *     "7656119...": [
+ *       {
+ *         "CurrentState": "...",
+ *         "BanReason": "..."
+ *       }
+ *     ]
+ *   }
+ * }
+ */
+async function fetchSourceBans(steamID64, apiKey) {
   if (!apiKey) {
     return {
       available: false,
@@ -372,14 +261,17 @@ async function fetchSourceBans(
       keywordMatch: false,
       matchedKeywords: [],
       records: [],
-      error:
-        "STEAMHISTORY_API_KEY is not configured"
+      activeBans: [],
+      error: "STEAMHISTORY_API_KEY is not configured"
     };
   }
 
   const params = new URLSearchParams({
     key: apiKey,
-    shouldkey: "0",
+
+    // SteamHistory SourceBans API format.
+    shouldkey: "1",
+
     steamids: steamID64
   });
 
@@ -403,15 +295,15 @@ async function fetchSourceBans(
         keywordMatch: false,
         matchedKeywords: [],
         records: [],
-        error:
-          `SteamHistory HTTP ${response.status}`
+        activeBans: [],
+        error: `SteamHistory HTTP ${response.status}`
       };
     }
 
-    let payload;
+    let data;
 
     try {
-      payload = await response.json();
+      data = await response.json();
     } catch (error) {
       console.error(
         "SteamHistory SourceBans: invalid JSON",
@@ -424,35 +316,33 @@ async function fetchSourceBans(
         keywordMatch: false,
         matchedKeywords: [],
         records: [],
-        error:
-          "SteamHistory returned invalid JSON"
+        activeBans: [],
+        error: "SteamHistory returned invalid JSON"
       };
     }
 
-    const records =
-      extractSourceBansRecords(
-        payload,
-        steamID64
-      );
+    const bans = data?.response?.[steamID64];
 
-    const keywordScan =
-      scanSourceBansKeywords(payload);
+    if (!Array.isArray(bans)) {
+      return {
+        available: true,
+        banned: false,
+        keywordMatch: false,
+        matchedKeywords: [],
+        records: [],
+        activeBans: []
+      };
+    }
+
+    const analysis = analyzeSourceBans(bans);
 
     return {
       available: true,
-
-      // A SourceBans record exists.
-      banned: records.length > 0,
-
-      // One of our cheating-related keywords was found
-      // inside a "keyword" / "keywords" field.
-      keywordMatch:
-        keywordScan.keywordMatch,
-
-      matchedKeywords:
-        keywordScan.matchedKeywords,
-
-      records
+      banned: analysis.banned,
+      keywordMatch: analysis.keywordMatch,
+      matchedKeywords: analysis.matchedKeywords,
+      records: bans,
+      activeBans: analysis.activeBans
     };
   } catch (error) {
     console.error(
@@ -466,8 +356,8 @@ async function fetchSourceBans(
       keywordMatch: false,
       matchedKeywords: [],
       records: [],
-      error:
-        "SteamHistory SourceBans request failed"
+      activeBans: [],
+      error: "SteamHistory SourceBans request failed"
     };
   }
 }
@@ -494,16 +384,14 @@ export default {
         return json({
           ok: true,
           service: "MCDB API",
-          version: 4,
-          usage:
-            "/lookup/<steamid64|steamid1|steamid3>"
+          version: 5,
+          usage: "/lookup/<steamid64|steamid1|steamid3>"
         });
       }
 
-      const match =
-        url.pathname.match(
-          /^\/lookup\/(.+)$/
-        );
+      const match = url.pathname.match(
+        /^\/lookup\/(.+)$/
+      );
 
       if (!match) {
         return json(
@@ -529,12 +417,10 @@ export default {
       }
 
       /*
-       * First resolve MCDB.
+       * 1. MCDB lookup
        */
       const record =
-        await findMcdbRecord(
-          lookupValue
-        );
+        await findMcdbRecord(lookupValue);
 
       const mcdbResult =
         record
@@ -545,16 +431,16 @@ export default {
           : null;
 
       /*
-       * SourceBans requires SteamID64.
-       *
-       * If the caller supplied SteamID1 / Steam3,
-       * use the canonical ID from MCDB.
+       * 2. Resolve SteamID64
        */
       const steamID64 =
         isSteamID64(lookupValue)
           ? lookupValue
           : record?.id || null;
 
+      /*
+       * 3. SteamHistory + SourceBans
+       */
       let steamHistory = null;
 
       let sourcebans = {
@@ -563,25 +449,17 @@ export default {
         keywordMatch: false,
         matchedKeywords: [],
         records: [],
+        activeBans: [],
         error:
           "No SteamID64 available for SourceBans lookup"
       };
 
       if (steamID64) {
-        /*
-         * Search SteamHistory profile.
-         *
-         * This is informational and does not determine
-         * whether the player is flagged.
-         */
         steamHistory =
           await searchSteamHistory(
             steamID64
           );
 
-        /*
-         * Check SourceBans.
-         */
         sourcebans =
           await fetchSourceBans(
             steamID64,
@@ -590,8 +468,10 @@ export default {
       }
 
       /*
-       * MCDB match OR SourceBans keyword match
-       * can be consumed by the Lua detector.
+       * 4. Final detector flag.
+       *
+       * MCDB match OR an active SourceBans
+       * keyword match = cheaterMatch.
        */
       const cheaterMatch =
         Boolean(mcdbResult) ||
@@ -600,11 +480,8 @@ export default {
       if (mcdbResult) {
         return json({
           ...mcdbResult,
-
           cheaterMatch,
-
           steamHistory,
-
           sourcebans
         });
       }
@@ -612,11 +489,8 @@ export default {
       return json({
         found: false,
         lookup: lookupValue,
-
         cheaterMatch,
-
         steamHistory,
-
         sourcebans
       });
     } catch (error) {
