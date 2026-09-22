@@ -1,9 +1,5 @@
 <h2 data-importer="text" align="left">Hi 👋!</h2>
 
-<h2 data-importer="text" align="left">CheaterList</h2>
-
-<h5 data-importer="text" align="left">List of TF2 players that were identified through known-cheater Steam groups and other sources.<br><br>We query the Steam API to collect Steam IDs from these groups, then perform ID conversions, duplicate checks, normalization, and database processing before publishing the data to the lookup system.</h5>
-
 <h2 align="left">Detection Pipeline</h2>
 The project uses a layered lookup pipeline so the client does not need to download the entire database.
 ```text
