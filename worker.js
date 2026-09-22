@@ -150,6 +150,7 @@ async function findMcdbRecord(lookup) {
   if (isSteamID64(lookup)) {
     const shard = steam64Shard(lookup);
     const data = await fetchShard(shard);
+
     return findRecordInData(data, lookup);
   }
 
@@ -202,7 +203,8 @@ async function searchSteamHistory(steamID64) {
 
 /*
   SteamHistory uses TF2BD as one of the community-data sources.
-  We keep the response normalized to:
+
+  Normalized output:
 
   "tf2bd": {
     "listed": true,
@@ -212,8 +214,7 @@ async function searchSteamHistory(steamID64) {
     ]
   }
 
-  The extractor is intentionally tolerant of nesting/casing so changes
-  in the SteamHistory search payload do not immediately break the Worker.
+  The extractor is intentionally tolerant of nesting/casing.
 */
 function extractTf2bdFromNode(node, visited = new Set()) {
   if (!node || typeof node !== "object") {
@@ -228,7 +229,11 @@ function extractTf2bdFromNode(node, visited = new Set()) {
 
   if (Array.isArray(node)) {
     for (const item of node) {
-      const result = extractTf2bdFromNode(item, visited);
+      const result = extractTf2bdFromNode(
+        item,
+        visited
+      );
+
       if (result) {
         return result;
       }
@@ -287,7 +292,11 @@ function extractTf2bdFromNode(node, visited = new Set()) {
   }
 
   for (const value of Object.values(node)) {
-    const result = extractTf2bdFromNode(value, visited);
+    const result = extractTf2bdFromNode(
+      value,
+      visited
+    );
+
     if (result) {
       return result;
     }
@@ -297,7 +306,9 @@ function extractTf2bdFromNode(node, visited = new Set()) {
 }
 
 function normalizeTf2bd(steamHistory) {
-  const extracted = extractTf2bdFromNode(steamHistory);
+  const extracted = extractTf2bdFromNode(
+    steamHistory
+  );
 
   if (!extracted) {
     return {
@@ -314,7 +325,10 @@ function normalizeTf2bd(steamHistory) {
   };
 }
 
-function extractCommunityFromNode(node, visited = new Set()) {
+function extractCommunityFromNode(
+  node,
+  visited = new Set()
+) {
   if (!node || typeof node !== "object") {
     return null;
   }
@@ -327,7 +341,11 @@ function extractCommunityFromNode(node, visited = new Set()) {
 
   if (Array.isArray(node)) {
     for (const item of node) {
-      const result = extractCommunityFromNode(item, visited);
+      const result = extractCommunityFromNode(
+        item,
+        visited
+      );
+
       if (result) {
         return result;
       }
@@ -372,7 +390,11 @@ function extractCommunityFromNode(node, visited = new Set()) {
   }
 
   for (const value of Object.values(node)) {
-    const result = extractCommunityFromNode(value, visited);
+    const result = extractCommunityFromNode(
+      value,
+      visited
+    );
+
     if (result) {
       return result;
     }
@@ -382,7 +404,8 @@ function extractCommunityFromNode(node, visited = new Set()) {
 }
 
 function normalizeCommunity(steamHistory) {
-  const extracted = extractCommunityFromNode(steamHistory);
+  const extracted =
+    extractCommunityFromNode(steamHistory);
 
   if (!extracted) {
     return {
@@ -392,7 +415,8 @@ function normalizeCommunity(steamHistory) {
   }
 
   return {
-    possibleCheater: extracted.possibleCheater === true,
+    possibleCheater:
+      extracted.possibleCheater === true,
     keywords: extracted.keywords
   };
 }
@@ -401,40 +425,290 @@ function isTf2bdCheater(tf2bd) {
   return (
     tf2bd &&
     tf2bd.listed === true &&
-    String(tf2bd.classification || "").toLowerCase() === "cheater"
+    String(
+      tf2bd.classification || ""
+    ).toLowerCase() === "cheater"
   );
 }
 
-function analyzeSourceBans(bans) {
-  const activeBans = bans.filter(
-    (ban) =>
-      ban &&
-      String(ban.CurrentState || "").toLowerCase() !== "unbanned"
-  );
+/*
+  Normalize SourceBans dates.
 
-  const matchedKeywords = new Set();
+  Supports:
+  - Unix timestamps in seconds
+  - Unix timestamps in milliseconds
+  - ISO date strings
+  - common SourceBans date field names
+*/
+function normalizeBanDate(value) {
+  if (
+    value === null ||
+    value === undefined ||
+    value === ""
+  ) {
+    return null;
+  }
+
+  if (
+    typeof value === "number" &&
+    Number.isFinite(value)
+  ) {
+    const milliseconds =
+      value < 100000000000
+        ? value * 1000
+        : value;
+
+    const date = new Date(milliseconds);
+
+    return Number.isNaN(date.getTime())
+      ? null
+      : date.toISOString();
+  }
+
+  const stringValue =
+    String(value).trim();
+
+  if (!stringValue) {
+    return null;
+  }
+
+  if (/^\d{10,13}$/.test(stringValue)) {
+    const numericValue =
+      Number(stringValue);
+
+    const milliseconds =
+      stringValue.length <= 10
+        ? numericValue * 1000
+        : numericValue;
+
+    const date =
+      new Date(milliseconds);
+
+    return Number.isNaN(date.getTime())
+      ? null
+      : date.toISOString();
+  }
+
+  const parsed =
+    Date.parse(stringValue);
+
+  if (Number.isNaN(parsed)) {
+    return null;
+  }
+
+  return new Date(parsed).toISOString();
+}
+
+function extractBanDate(ban) {
+  if (
+    !ban ||
+    typeof ban !== "object"
+  ) {
+    return null;
+  }
+
+  const preferredKeys = [
+    "BanDate",
+    "BanTime",
+    "banDate",
+    "banTime",
+    "CreatedAt",
+    "Created",
+    "createdAt",
+    "created",
+    "Date",
+    "date",
+    "Timestamp",
+    "timestamp",
+    "Time",
+    "time",
+    "IssuedAt",
+    "issuedAt",
+    "Issued",
+    "issued",
+    "BanCreated",
+    "banCreated",
+    "CreatedOn",
+    "createdOn"
+  ];
+
+  for (const key of preferredKeys) {
+    if (
+      Object.prototype.hasOwnProperty.call(
+        ban,
+        key
+      )
+    ) {
+      const normalized =
+        normalizeBanDate(ban[key]);
+
+      if (normalized) {
+        return normalized;
+      }
+    }
+  }
+
+  const normalizedKeys =
+    new Map();
+
+  for (const [key, value] of Object.entries(ban)) {
+    const normalizedKey =
+      String(key)
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, "");
+
+    normalizedKeys.set(
+      normalizedKey,
+      value
+    );
+  }
+
+  const fallbackKeys = [
+    "bandate",
+    "bantime",
+    "createdat",
+    "created",
+    "date",
+    "timestamp",
+    "time",
+    "issuedat",
+    "issued",
+    "bancreated",
+    "createdon"
+  ];
+
+  for (const key of fallbackKeys) {
+    if (normalizedKeys.has(key)) {
+      const normalized =
+        normalizeBanDate(
+          normalizedKeys.get(key)
+        );
+
+      if (normalized) {
+        return normalized;
+      }
+    }
+  }
+
+  return null;
+}
+
+function decorateBanRecord(ban) {
+  if (
+    !ban ||
+    typeof ban !== "object"
+  ) {
+    return ban;
+  }
+
+  const banDate =
+    extractBanDate(ban);
+
+  if (!banDate) {
+    return {
+      ...ban
+    };
+  }
+
+  return {
+    ...ban,
+    banDate
+  };
+}
+
+function getLatestBanDate(bans) {
+  let latest = null;
+
+  for (const ban of bans) {
+    const date =
+      ban?.banDate;
+
+    if (!date) {
+      continue;
+    }
+
+    if (
+      !latest ||
+      Date.parse(date) >
+        Date.parse(latest)
+    ) {
+      latest = date;
+    }
+  }
+
+  return latest;
+}
+
+function analyzeSourceBans(bans) {
+  const decoratedBans =
+    bans.map(
+      decorateBanRecord
+    );
+
+  const activeBans =
+    decoratedBans.filter(
+      (ban) =>
+        ban &&
+        String(
+          ban.CurrentState || ""
+        ).toLowerCase() !==
+          "unbanned"
+    );
+
+  const matchedKeywords =
+    new Set();
 
   for (const ban of activeBans) {
-    const reason = String(
-      ban?.BanReason || ""
-    ).toLowerCase();
+    const reason =
+      String(
+        ban?.BanReason || ""
+      ).toLowerCase();
 
-    for (const keyword of SOURCEBANS_KEYWORDS) {
-      if (reason.includes(keyword.toLowerCase())) {
-        matchedKeywords.add(keyword);
+    for (
+      const keyword of SOURCEBANS_KEYWORDS
+    ) {
+      if (
+        reason.includes(
+          keyword.toLowerCase()
+        )
+      ) {
+        matchedKeywords.add(
+          keyword
+        );
       }
     }
   }
 
   return {
-    banned: activeBans.length > 0,
+    banned:
+      activeBans.length > 0,
+
     activeBans,
-    keywordMatch: matchedKeywords.size > 0,
-    matchedKeywords: [...matchedKeywords]
+
+    keywordMatch:
+      matchedKeywords.size > 0,
+
+    matchedKeywords:
+      [...matchedKeywords],
+
+    latestBanDate:
+      getLatestBanDate(
+        decoratedBans
+      ),
+
+    activeBanDate:
+      getLatestBanDate(
+        activeBans
+      ),
+
+    decoratedBans
   };
 }
 
-async function fetchSourceBans(steamID64, apiKey) {
+async function fetchSourceBans(
+  steamID64,
+  apiKey
+) {
   if (!apiKey) {
     return {
       available: false,
@@ -443,24 +717,29 @@ async function fetchSourceBans(steamID64, apiKey) {
       matchedKeywords: [],
       records: [],
       activeBans: [],
-      error: "STEAMHISTORY_API_KEY is not configured"
+      latestBanDate: null,
+      activeBanDate: null,
+      error:
+        "STEAMHISTORY_API_KEY is not configured"
     };
   }
 
-  const params = new URLSearchParams({
-    key: apiKey,
-    shouldkey: "1",
-    steamids: steamID64
-  });
+  const params =
+    new URLSearchParams({
+      key: apiKey,
+      shouldkey: "1",
+      steamids: steamID64
+    });
 
   try {
-    const response = await fetch(
-      `${STEAMHISTORY_SOURCEBANS_URL}?${params.toString()}`,
-      {
-        method: "GET",
-        cache: "no-store"
-      }
-    );
+    const response =
+      await fetch(
+        `${STEAMHISTORY_SOURCEBANS_URL}?${params.toString()}`,
+        {
+          method: "GET",
+          cache: "no-store"
+        }
+      );
 
     if (!response.ok) {
       console.error(
@@ -474,14 +753,18 @@ async function fetchSourceBans(steamID64, apiKey) {
         matchedKeywords: [],
         records: [],
         activeBans: [],
-        error: `SteamHistory HTTP ${response.status}`
+        latestBanDate: null,
+        activeBanDate: null,
+        error:
+          `SteamHistory HTTP ${response.status}`
       };
     }
 
     let data;
 
     try {
-      data = await response.json();
+      data =
+        await response.json();
     } catch (error) {
       console.error(
         "SteamHistory SourceBans: invalid JSON",
@@ -495,11 +778,15 @@ async function fetchSourceBans(steamID64, apiKey) {
         matchedKeywords: [],
         records: [],
         activeBans: [],
-        error: "SteamHistory returned invalid JSON"
+        latestBanDate: null,
+        activeBanDate: null,
+        error:
+          "SteamHistory returned invalid JSON"
       };
     }
 
-    const bans = data?.response?.[steamID64];
+    const bans =
+      data?.response?.[steamID64];
 
     if (!Array.isArray(bans)) {
       return {
@@ -508,19 +795,41 @@ async function fetchSourceBans(steamID64, apiKey) {
         keywordMatch: false,
         matchedKeywords: [],
         records: [],
-        activeBans: []
+        activeBans: [],
+        latestBanDate: null,
+        activeBanDate: null
       };
     }
 
-    const analysis = analyzeSourceBans(bans);
+    const analysis =
+      analyzeSourceBans(
+        bans
+      );
 
     return {
       available: true,
-      banned: analysis.banned,
-      keywordMatch: analysis.keywordMatch,
-      matchedKeywords: analysis.matchedKeywords,
-      records: bans,
-      activeBans: analysis.activeBans
+
+      banned:
+        analysis.banned,
+
+      keywordMatch:
+        analysis.keywordMatch,
+
+      matchedKeywords:
+        analysis.matchedKeywords,
+
+      latestBanDate:
+        analysis.latestBanDate,
+
+      activeBanDate:
+        analysis.activeBanDate,
+
+      records:
+        analysis.decoratedBans ||
+        bans,
+
+      activeBans:
+        analysis.activeBans
     };
   } catch (error) {
     console.error(
@@ -535,7 +844,10 @@ async function fetchSourceBans(steamID64, apiKey) {
       matchedKeywords: [],
       records: [],
       activeBans: [],
-      error: "SteamHistory SourceBans request failed"
+      latestBanDate: null,
+      activeBanDate: null,
+      error:
+        "SteamHistory SourceBans request failed"
     };
   }
 }
@@ -543,13 +855,17 @@ async function fetchSourceBans(steamID64, apiKey) {
 export default {
   async fetch(request, env) {
     try {
-      const url = new URL(request.url);
+      const url =
+        new URL(request.url);
 
-      if (request.method !== "GET") {
+      if (
+        request.method !== "GET"
+      ) {
         return json(
           {
             found: false,
-            error: "Method not allowed"
+            error:
+              "Method not allowed"
           },
           405
         );
@@ -562,14 +878,16 @@ export default {
         return json({
           ok: true,
           service: "MCDB API",
-          version: 6,
-          usage: "/lookup/<steamid64|steamid1|steamid3>"
+          version: 7,
+          usage:
+            "/lookup/<steamid64|steamid1|steamid3>"
         });
       }
 
-      const match = url.pathname.match(
-        /^\/lookup\/(.+)$/
-      );
+      const match =
+        url.pathname.match(
+          /^\/lookup\/(.+)$/
+        );
 
       if (!match) {
         return json(
@@ -582,20 +900,25 @@ export default {
       }
 
       const lookupValue =
-        normalizeLookup(match[1]);
+        normalizeLookup(
+          match[1]
+        );
 
       if (!lookupValue) {
         return json(
           {
             found: false,
-            error: "Missing Steam ID"
+            error:
+              "Missing Steam ID"
           },
           400
         );
       }
 
       const record =
-        await findMcdbRecord(lookupValue);
+        await findMcdbRecord(
+          lookupValue
+        );
 
       const mcdbResult =
         record
@@ -630,6 +953,8 @@ export default {
         matchedKeywords: [],
         records: [],
         activeBans: [],
+        latestBanDate: null,
+        activeBanDate: null,
         error:
           "No SteamID64 available for SourceBans lookup"
       };
@@ -693,7 +1018,8 @@ export default {
         {
           found: false,
           cheaterMatch: false,
-          error: "Internal server error"
+          error:
+            "Internal server error"
         },
         500
       );
