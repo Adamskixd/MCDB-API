@@ -140,7 +140,6 @@ function findRecordInData(data, lookup) {
 }
 
 async function findMcdbRecord(lookup) {
-  // Manual database is checked first.
   const manual = await fetchManualTest();
   const manualRecord = findRecordInData(manual, lookup);
 
@@ -148,15 +147,12 @@ async function findMcdbRecord(lookup) {
     return manualRecord;
   }
 
-  // SteamID64 -> direct shard lookup.
   if (isSteamID64(lookup)) {
     const shard = steam64Shard(lookup);
     const data = await fetchShard(shard);
-
     return findRecordInData(data, lookup);
   }
 
-  // SteamID1 / Steam3 -> search all shards.
   if (isSteamID1(lookup) || isSteamID3(lookup)) {
     const shards = Array.from(
       { length: 256 },
@@ -194,9 +190,6 @@ function buildResult(record, lookup) {
   };
 }
 
-/*
- * SteamHistory profile search.
- */
 async function searchSteamHistory(steamID64) {
   return postJson(
     STEAMHISTORY_SEARCH_URL,
@@ -208,8 +201,210 @@ async function searchSteamHistory(steamID64) {
 }
 
 /*
- * Scan SourceBans BanReason values for keywords.
- */
+  SteamHistory uses TF2BD as one of the community-data sources.
+  We keep the response normalized to:
+
+  "tf2bd": {
+    "listed": true,
+    "classification": "Cheater",
+    "sources": [
+      "Vorobey-HackerPolice"
+    ]
+  }
+
+  The extractor is intentionally tolerant of nesting/casing so changes
+  in the SteamHistory search payload do not immediately break the Worker.
+*/
+function extractTf2bdFromNode(node, visited = new Set()) {
+  if (!node || typeof node !== "object") {
+    return null;
+  }
+
+  if (visited.has(node)) {
+    return null;
+  }
+
+  visited.add(node);
+
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const result = extractTf2bdFromNode(item, visited);
+      if (result) {
+        return result;
+      }
+    }
+
+    return null;
+  }
+
+  for (const [key, value] of Object.entries(node)) {
+    const normalizedKey = String(key)
+      .toLowerCase()
+      .replace(/[\s_-]/g, "");
+
+    if (
+      normalizedKey === "tf2bd" ||
+      normalizedKey === "tf2botdetector"
+    ) {
+      if (value && typeof value === "object") {
+        const listed =
+          value.listed === true ||
+          value.isListed === true ||
+          value.Listed === true;
+
+        const classification =
+          value.classification ??
+          value.Classification ??
+          value.status ??
+          value.Status ??
+          null;
+
+        const rawSources =
+          value.sources ??
+          value.Sources ??
+          value.source ??
+          value.Source ??
+          [];
+
+        const sources = Array.isArray(rawSources)
+          ? rawSources
+              .map((source) => String(source).trim())
+              .filter(Boolean)
+          : rawSources
+            ? [String(rawSources).trim()].filter(Boolean)
+            : [];
+
+        return {
+          listed,
+          classification:
+            classification == null
+              ? null
+              : String(classification),
+          sources
+        };
+      }
+    }
+  }
+
+  for (const value of Object.values(node)) {
+    const result = extractTf2bdFromNode(value, visited);
+    if (result) {
+      return result;
+    }
+  }
+
+  return null;
+}
+
+function normalizeTf2bd(steamHistory) {
+  const extracted = extractTf2bdFromNode(steamHistory);
+
+  if (!extracted) {
+    return {
+      listed: false,
+      classification: null,
+      sources: []
+    };
+  }
+
+  return {
+    listed: extracted.listed === true,
+    classification: extracted.classification,
+    sources: extracted.sources
+  };
+}
+
+function extractCommunityFromNode(node, visited = new Set()) {
+  if (!node || typeof node !== "object") {
+    return null;
+  }
+
+  if (visited.has(node)) {
+    return null;
+  }
+
+  visited.add(node);
+
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const result = extractCommunityFromNode(item, visited);
+      if (result) {
+        return result;
+      }
+    }
+
+    return null;
+  }
+
+  for (const [key, value] of Object.entries(node)) {
+    const normalizedKey = String(key)
+      .toLowerCase()
+      .replace(/[\s_-]/g, "");
+
+    if (
+      normalizedKey === "community" ||
+      normalizedKey === "communitybans"
+    ) {
+      if (value && typeof value === "object") {
+        const possibleCheater =
+          value.possibleCheater === true ||
+          value.PossibleCheater === true;
+
+        const rawKeywords =
+          value.keywords ??
+          value.Keywords ??
+          [];
+
+        const keywords = Array.isArray(rawKeywords)
+          ? rawKeywords
+              .map((keyword) => String(keyword).trim())
+              .filter(Boolean)
+          : rawKeywords
+            ? [String(rawKeywords).trim()].filter(Boolean)
+            : [];
+
+        return {
+          possibleCheater,
+          keywords
+        };
+      }
+    }
+  }
+
+  for (const value of Object.values(node)) {
+    const result = extractCommunityFromNode(value, visited);
+    if (result) {
+      return result;
+    }
+  }
+
+  return null;
+}
+
+function normalizeCommunity(steamHistory) {
+  const extracted = extractCommunityFromNode(steamHistory);
+
+  if (!extracted) {
+    return {
+      possibleCheater: false,
+      keywords: []
+    };
+  }
+
+  return {
+    possibleCheater: extracted.possibleCheater === true,
+    keywords: extracted.keywords
+  };
+}
+
+function isTf2bdCheater(tf2bd) {
+  return (
+    tf2bd &&
+    tf2bd.listed === true &&
+    String(tf2bd.classification || "").toLowerCase() === "cheater"
+  );
+}
+
 function analyzeSourceBans(bans) {
   const activeBans = bans.filter(
     (ban) =>
@@ -239,20 +434,6 @@ function analyzeSourceBans(bans) {
   };
 }
 
-/*
- * SteamHistory SourceBans response is expected to look like:
- *
- * {
- *   "response": {
- *     "7656119...": [
- *       {
- *         "CurrentState": "...",
- *         "BanReason": "..."
- *       }
- *     ]
- *   }
- * }
- */
 async function fetchSourceBans(steamID64, apiKey) {
   if (!apiKey) {
     return {
@@ -268,10 +449,7 @@ async function fetchSourceBans(steamID64, apiKey) {
 
   const params = new URLSearchParams({
     key: apiKey,
-
-    // SteamHistory SourceBans API format.
     shouldkey: "1",
-
     steamids: steamID64
   });
 
@@ -384,7 +562,7 @@ export default {
         return json({
           ok: true,
           service: "MCDB API",
-          version: 5,
+          version: 6,
           usage: "/lookup/<steamid64|steamid1|steamid3>"
         });
       }
@@ -416,9 +594,6 @@ export default {
         );
       }
 
-      /*
-       * 1. MCDB lookup
-       */
       const record =
         await findMcdbRecord(lookupValue);
 
@@ -430,18 +605,23 @@ export default {
             )
           : null;
 
-      /*
-       * 2. Resolve SteamID64
-       */
       const steamID64 =
         isSteamID64(lookupValue)
           ? lookupValue
           : record?.id || null;
 
-      /*
-       * 3. SteamHistory + SourceBans
-       */
       let steamHistory = null;
+
+      let tf2bd = {
+        listed: false,
+        classification: null,
+        sources: []
+      };
+
+      let community = {
+        possibleCheater: false,
+        keywords: []
+      };
 
       let sourcebans = {
         available: false,
@@ -460,6 +640,16 @@ export default {
             steamID64
           );
 
+        tf2bd =
+          normalizeTf2bd(
+            steamHistory
+          );
+
+        community =
+          normalizeCommunity(
+            steamHistory
+          );
+
         sourcebans =
           await fetchSourceBans(
             steamID64,
@@ -467,20 +657,18 @@ export default {
           );
       }
 
-      /*
-       * 4. Final detector flag.
-       *
-       * MCDB match OR an active SourceBans
-       * keyword match = cheaterMatch.
-       */
       const cheaterMatch =
         Boolean(mcdbResult) ||
-        sourcebans.keywordMatch === true;
+        sourcebans.keywordMatch === true ||
+        isTf2bdCheater(tf2bd) ||
+        community.possibleCheater === true;
 
       if (mcdbResult) {
         return json({
           ...mcdbResult,
           cheaterMatch,
+          tf2bd,
+          community,
           steamHistory,
           sourcebans
         });
@@ -490,6 +678,8 @@ export default {
         found: false,
         lookup: lookupValue,
         cheaterMatch,
+        tf2bd,
+        community,
         steamHistory,
         sourcebans
       });
