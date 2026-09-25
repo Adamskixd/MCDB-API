@@ -1,6 +1,6 @@
 const REPO_RAW_BASE =
   "https://raw.githubusercontent.com/Adamskixd/MCDB-API/main/data/shards";
-//test
+//build
 const MANUAL_TEST_URL =
   "https://raw.githubusercontent.com/Adamskixd/MCDB-API/main/data/manual_test.json";
 
