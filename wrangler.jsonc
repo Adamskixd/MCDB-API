@@ -1,12 +1,7 @@
 {
+  "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "mcdb-api",
   "main": "worker.js",
-  "compatibility_date": "2026-09-21",
-
-  "observability": {
-    "logs": {
-      "enabled": false,
-      "invocation_logs": true
-    }
-  }
+  "compatibility_date": "2026-09-25",
+  "workers_dev": true
 }
